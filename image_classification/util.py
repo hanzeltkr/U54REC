@@ -6,7 +6,7 @@
 
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers
-from tensorflow.keras.applications.resnet50 import preprocess_input
+from tensorflow.keras.applications.resnet50 import preprocess_input as resnet_preprocess
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -32,6 +32,7 @@ class Util:
         self.val_ds = []
         self.test_ds = []
         self.test_labels = []
+        self.fine_tune_at = 0
 
     #Util.load('path/') for train val data
     def load(self, img_path, header_path, random_seed=10):
@@ -201,8 +202,42 @@ class Util:
         # Freeze base model
         self.base_model.trainable = False
         self.base_model.summary()
-        self.model = self._build_model(0.1, use_meta, self.train_headers_num_np, self.train_headers_str_np)
+        self.fine_tune_at = len(self.base_model.layers) - 50
+        self.model = self._build_model(0.1, use_meta, self.train_headers_num_np, self.train_headers_str_np, resnet_preprocess)
         
+        # Show input pipeline and summary
+        tf.keras.utils.plot_model(self.model, "multi_input_and_output_model.png", show_shapes=True)
+        self.model.summary()
+
+        # Compile the model
+        self.model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate = 1e-4),
+            loss=tf.keras.losses.BinaryCrossentropy(from_logits=False),
+            metrics=[
+                tf.keras.metrics.AUC(curve="ROC", name = 'auc'),
+            ]
+        )
+
+
+    #Util.setupEfficientNet()
+    def setupEfficientNet(self, use_meta=True) :
+        # Configure dataset performance
+        AUTOTUNE = tf.data.AUTOTUNE
+        self.train_ds = self.train_ds.prefetch(buffer_size=AUTOTUNE)
+        self.val_ds = self.val_ds.prefetch(buffer_size=AUTOTUNE)
+        self.test_ds = self.test_ds.prefetch(buffer_size=AUTOTUNE)
+    
+        # Import pretrained model
+        self.base_model = tf.keras.applications.EfficientNetB0(input_shape=(1024, 1024, 3),
+                                                               include_top=False, # Don't include ImageNet classifier at the top,
+                                                               weights='imagenet',
+        )
+        # Freeze base model
+        self.base_model.trainable = False
+        self.base_model.summary()
+        self.fine_tune_at = len(self.base_model.layers) - 20
+        self.model = self._build_model(0.2, use_meta, self.train_headers_num_np, self.train_headers_str_np, lambda x : x)
+            
         # Show input pipeline and summary
         tf.keras.utils.plot_model(self.model, "multi_input_and_output_model.png", show_shapes=True)
         self.model.summary()
@@ -240,10 +275,8 @@ class Util:
                   callbacks = callbacks)
 
         self.base_model.trainable = True
-        # Fine-tune from this layer onwards
-        fine_tune_at = len(self.base_model.layers) - 50
         # Unfreeze only the head layers
-        for layer in self.base_model.layers[:fine_tune_at]:
+        for layer in self.base_model.layers[:self.fine_tune_at]:
             layer.trainable = False
         # Freeze BatchNorm layers
         for layer in self.base_model.layers:
@@ -397,7 +430,7 @@ class Util:
             return self._load_image(*args, use_meta=use_meta)
         return wrapper
 
-    def _build_model(self, dropout_rate, use_meta, header_num, header_str) : 
+    def _build_model(self, dropout_rate, use_meta, header_num, header_str, preprocess_fn) : 
         all_inputs = []
         encoded_features = []
         if use_meta : 
@@ -424,7 +457,7 @@ class Util:
         image_input = tf.keras.Input(shape=(1024, 1024, 1), name = 'image_input')
         x = data_augmentation(image_input)
         x = tf.keras.layers.Concatenate()([x, x, x])
-        x = preprocess_input(x) 
+        x = preprocess_fn(x)
 
         # Keep base model in inference mode
         x = self.base_model(x, training = False)
